@@ -109,7 +109,7 @@ class FileProcessor:
 
     def _process_docx(self, source_path: str, output_path: str) -> Dict[str, Any]:
         """处理 Word 文档 (.docx)
-        保留段落、表格、字体、排版格式
+        保留段落、表格、字体、排版格式与 Run 级样式
         """
         doc = docx.Document(source_path)
         total_stats = {
@@ -123,17 +123,35 @@ class FileProcessor:
             if not p.text:
                 return
             new_text, s = self.desensitizer.desensitize(p.text)
-            if new_text != p.text:
-                # 合计统计
-                for k in total_stats:
-                    total_stats[k] += s.get(k, 0)
-                # 保持样式写回
-                if p.runs:
-                    p.runs[0].text = new_text
-                    for r in p.runs[1:]:
-                        r.text = ""
-                else:
-                    p.text = new_text
+            if new_text == p.text:
+                return
+
+            # 合计统计
+            for k in total_stats:
+                total_stats[k] += s.get(k, 0)
+
+            # 优先尝试 Run 级别的原位精准替换，保留粗体、颜色、字号等独立样式
+            if len(p.runs) > 1:
+                run_desensitized = []
+                for r in p.runs:
+                    if r.text:
+                        new_r_text, _ = self.desensitizer.desensitize(r.text)
+                        run_desensitized.append(new_r_text)
+                    else:
+                        run_desensitized.append("")
+
+                if "".join(run_desensitized) == new_text:
+                    for r, new_r in zip(p.runs, run_desensitized):
+                        r.text = new_r
+                    return
+
+            # 回退策略：当敏感词跨越 Run 边界时，写回首个 Run 并清空后续 Run
+            if p.runs:
+                p.runs[0].text = new_text
+                for r in p.runs[1:]:
+                    r.text = ""
+            else:
+                p.text = new_text
 
         # 1. 主体段落
         for p in doc.paragraphs:
@@ -158,6 +176,7 @@ class FileProcessor:
 
     def _process_xlsx(self, source_path: str, output_path: str) -> Dict[str, Any]:
         """处理 Excel 工作簿 (.xlsx)
+        支持公式保护、序号/编号列保护及手机号/身份证长数值识别
         """
         wb = openpyxl.load_workbook(source_path)
         total_stats = {
@@ -167,25 +186,62 @@ class FileProcessor:
             "total_count": 0,
         }
 
+        seq_headers = {"序号", "编号", "id", "no.", "no", "序列号", "行号"}
+
         for sheet in wb.worksheets:
-            for row in sheet.iter_rows():
-                for cell in row:
+            # 扫描首行，标记序号/编号列
+            seq_col_indices = set()
+            first_row = list(sheet.iter_rows(min_row=1, max_row=1))
+            if first_row:
+                for col_idx, cell in enumerate(first_row[0]):
+                    if cell.value and isinstance(cell.value, str):
+                        header_clean = cell.value.strip().lower()
+                        if header_clean in seq_headers or any(h in header_clean for h in ["序号", "编号"]):
+                            seq_col_indices.add(col_idx)
+
+            for row_idx, row in enumerate(sheet.iter_rows()):
+                for col_idx, cell in enumerate(row):
                     val = cell.value
                     if val is None:
                         continue
+
+                    # 1. 字符串单元格处理
                     if isinstance(val, str):
+                        # 保护公式：以 '=' 开头的不破坏公式结构
+                        if val.startswith("="):
+                            continue
                         new_val, s = self.desensitizer.desensitize(val)
                         if new_val != val:
                             cell.value = new_val
                             for k in total_stats:
                                 total_stats[k] += s.get(k, 0)
-                    elif isinstance(val, (int, float)) and self.desensitizer.config.mask_numbers:
-                        # 单元格为纯数字
+
+                    # 2. 纯数值单元格处理
+                    elif isinstance(val, (int, float)):
+                        # 首行表头或者被判定为“序号/编号”列中的整数递增序号予以保护
+                        if row_idx > 0 and col_idx in seq_col_indices and isinstance(val, int) and self.desensitizer.config.protect_sequence:
+                            total_stats["protected_count"] += 1
+                            continue
+
                         val_str = str(val)
-                        masked_str = self.desensitizer.mask_number_text(val_str)
-                        cell.value = masked_str
-                        total_stats["number_count"] += 1
-                        total_stats["total_count"] += 1
+                        # 智能识别存为数值的长敏感实体
+                        if isinstance(val, int) and len(val_str) == 11 and val_str.startswith("1") and self.desensitizer.config.mask_phone:
+                            cell.value = self.desensitizer.mask_entity_text(val_str)
+                            total_stats["entity_count"] += 1
+                            total_stats["total_count"] += 1
+                        elif isinstance(val, int) and len(val_str) in (15, 18) and self.desensitizer.config.mask_id_card:
+                            cell.value = self.desensitizer.mask_entity_text(val_str)
+                            total_stats["entity_count"] += 1
+                            total_stats["total_count"] += 1
+                        elif isinstance(val, int) and 16 <= len(val_str) <= 19 and self.desensitizer.config.mask_bank_card:
+                            cell.value = self.desensitizer.mask_entity_text(val_str)
+                            total_stats["entity_count"] += 1
+                            total_stats["total_count"] += 1
+                        elif self.desensitizer.config.mask_numbers:
+                            masked_str = self.desensitizer.mask_number_text(val_str)
+                            cell.value = masked_str
+                            total_stats["number_count"] += 1
+                            total_stats["total_count"] += 1
 
         wb.save(output_path)
         return total_stats

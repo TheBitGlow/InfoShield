@@ -6,14 +6,14 @@ import sys
 import json
 from typing import List, Dict, Any
 
-from PySide6.QtCore import Qt, QThread, Signal, QSize
-from PySide6.QtGui import QIcon, QFont, QColor, QDragEnterEvent, QDropEvent
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings
+from PySide6.QtGui import QIcon, QFont, QColor, QDragEnterEvent, QDropEvent, QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
     QHeaderView, QTabWidget, QTextEdit, QPlainTextEdit, QLineEdit,
     QCheckBox, QProgressBar, QFileDialog, QMessageBox, QFrame,
-    QSplitter, QGroupBox, QScrollArea, QComboBox
+    QSplitter, QGroupBox, QScrollArea, QComboBox, QMenu
 )
 
 from ..config import (
@@ -24,6 +24,19 @@ from ..core.desensitizer import Desensitizer, DesensitizerConfig
 from ..core.processor import FileProcessor
 from ..i18n import I18n, t
 from .styles import MODERN_STYLE
+
+
+class FileTableWidget(QTableWidget):
+    """支持键盘 Delete/Backspace 删除选定行的增强表格
+    """
+    delete_pressed = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.delete_pressed.emit()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
 
 class BatchProcessWorker(QThread):
@@ -139,11 +152,14 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1020, 680)
 
         self.file_list: List[str] = []
+        self.output_map: Dict[str, str] = {}
         self.last_output_dir = ""
         self.worker: BatchProcessWorker = None
+        self.is_processing = False
 
         self._init_ui()
         self._load_zh_preview()
+        self._load_user_settings()
 
     def _init_ui(self):
         # 整体布局
@@ -229,7 +245,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(btn_bar)
 
         # 文件列表表格
-        self.table = QTableWidget()
+        self.table = FileTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels([
             t("col_filename"), t("col_format"), t("col_size"), t("col_status")
@@ -240,6 +256,10 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.delete_pressed.connect(self.remove_selected_files)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_table_context_menu)
+        self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
         left_layout.addWidget(self.table)
 
         splitter.addWidget(left_card)
@@ -273,6 +293,8 @@ class MainWindow(QMainWindow):
 
         self.chk_mask_names = QCheckBox(t("chk_mask_names"))
         self.chk_mask_names.setChecked(True)
+        self.chk_auto_names = QCheckBox(t("chk_auto_names"))
+        self.chk_auto_names.setChecked(True)
         self.chk_mask_units = QCheckBox(t("chk_mask_units"))
         self.chk_mask_units.setChecked(True)
         self.chk_mask_industries = QCheckBox(t("chk_mask_industries"))
@@ -283,6 +305,12 @@ class MainWindow(QMainWindow):
         self.chk_mask_phone.setChecked(True)
         self.chk_mask_email = QCheckBox(t("chk_mask_email"))
         self.chk_mask_email.setChecked(True)
+        self.chk_mask_ip = QCheckBox(t("chk_mask_ip"))
+        self.chk_mask_ip.setChecked(True)
+        self.chk_mask_bank_card = QCheckBox(t("chk_mask_bank_card"))
+        self.chk_mask_bank_card.setChecked(True)
+        self.chk_mask_license_plate = QCheckBox(t("chk_mask_license_plate"))
+        self.chk_mask_license_plate.setChecked(True)
         self.chk_auto_orgs = QCheckBox(t("chk_auto_orgs"))
         self.chk_auto_orgs.setChecked(True)
         self.chk_auto_ind = QCheckBox(t("chk_auto_ind"))
@@ -291,11 +319,15 @@ class MainWindow(QMainWindow):
         self.chk_mask_custom_words.setChecked(True)
 
         grp_entity_layout.addWidget(self.chk_mask_names)
+        grp_entity_layout.addWidget(self.chk_auto_names)
         grp_entity_layout.addWidget(self.chk_mask_units)
         grp_entity_layout.addWidget(self.chk_mask_industries)
         grp_entity_layout.addWidget(self.chk_mask_id_card)
         grp_entity_layout.addWidget(self.chk_mask_phone)
         grp_entity_layout.addWidget(self.chk_mask_email)
+        grp_entity_layout.addWidget(self.chk_mask_ip)
+        grp_entity_layout.addWidget(self.chk_mask_bank_card)
+        grp_entity_layout.addWidget(self.chk_mask_license_plate)
         grp_entity_layout.addWidget(self.chk_auto_orgs)
         grp_entity_layout.addWidget(self.chk_auto_ind)
         grp_entity_layout.addWidget(self.chk_mask_custom_words)
@@ -511,8 +543,9 @@ class MainWindow(QMainWindow):
 
         # 事件监听（细分子项全部绑定实时预览响应）
         all_checkboxes = [
-            self.chk_mask_names, self.chk_mask_units, self.chk_mask_industries,
+            self.chk_mask_names, self.chk_auto_names, self.chk_mask_units, self.chk_mask_industries,
             self.chk_mask_id_card, self.chk_mask_phone, self.chk_mask_email,
+            self.chk_mask_ip, self.chk_mask_bank_card, self.chk_mask_license_plate,
             self.chk_auto_orgs, self.chk_auto_ind, self.chk_mask_custom_words,
             self.chk_mask_currency, self.chk_mask_percentages, self.chk_mask_counts,
             self.chk_mask_dates, self.chk_mask_standalone,
@@ -557,11 +590,15 @@ class MainWindow(QMainWindow):
         # Rules tab
         self.grp_entity.setTitle(t("grp_entity"))
         self.chk_mask_names.setText(t("chk_mask_names"))
+        self.chk_auto_names.setText(t("chk_auto_names"))
         self.chk_mask_units.setText(t("chk_mask_units"))
         self.chk_mask_industries.setText(t("chk_mask_industries"))
         self.chk_mask_id_card.setText(t("chk_mask_id_card"))
         self.chk_mask_phone.setText(t("chk_mask_phone"))
         self.chk_mask_email.setText(t("chk_mask_email"))
+        self.chk_mask_ip.setText(t("chk_mask_ip"))
+        self.chk_mask_bank_card.setText(t("chk_mask_bank_card"))
+        self.chk_mask_license_plate.setText(t("chk_mask_license_plate"))
         self.chk_auto_orgs.setText(t("chk_auto_orgs"))
         self.chk_auto_ind.setText(t("chk_auto_ind"))
         self.chk_mask_custom_words.setText(t("chk_mask_custom_words"))
@@ -605,7 +642,7 @@ class MainWindow(QMainWindow):
 
         # Bottom Bar
         self.btn_open_folder.setText(t("btn_open_folder"))
-        self.btn_start.setText(t("btn_start"))
+        self.btn_start.setText(t("btn_stop") if self.is_processing else t("btn_start"))
 
         if not self.file_list:
             self.lbl_status.setText(t("status_ready"))
@@ -634,11 +671,15 @@ class MainWindow(QMainWindow):
             protect_special_seq=self.chk_prot_special.isChecked(),
             # 实体类
             mask_names=self.chk_mask_names.isChecked(),
+            auto_detect_names=self.chk_auto_names.isChecked(),
             mask_units=self.chk_mask_units.isChecked(),
             mask_industries=self.chk_mask_industries.isChecked(),
             mask_id_card=self.chk_mask_id_card.isChecked(),
             mask_phone=self.chk_mask_phone.isChecked(),
             mask_email=self.chk_mask_email.isChecked(),
+            mask_ip=self.chk_mask_ip.isChecked(),
+            mask_bank_card=self.chk_mask_bank_card.isChecked(),
+            mask_license_plate=self.chk_mask_license_plate.isChecked(),
             mask_custom_keywords=self.chk_mask_custom_words.isChecked(),
             auto_detect_orgs=self.chk_auto_orgs.isChecked(),
             auto_detect_industries=self.chk_auto_ind.isChecked(),
@@ -828,11 +869,102 @@ class MainWindow(QMainWindow):
 
     def clear_files(self):
         self.file_list.clear()
+        self.output_map.clear()
         self.table.setRowCount(0)
         self.progress_bar.setValue(0)
         self.lbl_status.setText(t("status_cleared"))
 
+    def remove_selected_files(self):
+        selected_rows = sorted(set(index.row() for index in self.table.selectedIndexes()), reverse=True)
+        if not selected_rows:
+            return
+        for r in selected_rows:
+            if 0 <= r < len(self.file_list):
+                file_path = self.file_list[r]
+                self.output_map.pop(file_path, None)
+                del self.file_list[r]
+            self.table.removeRow(r)
+        self.lbl_status.setText(t("status_deleted_items", len(selected_rows)))
+
+    def _show_table_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        if row < 0 or row >= len(self.file_list):
+            return
+
+        file_path = self.file_list[row]
+        menu = QMenu(self)
+
+        act_preview = menu.addAction(t("menu_preview"))
+        act_open_file = menu.addAction(t("menu_open_file"))
+        act_open_dir = menu.addAction(t("menu_open_dir"))
+        menu.addSeparator()
+        act_remove = menu.addAction(t("menu_remove"))
+
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action == act_remove:
+            self.remove_selected_files()
+        elif action == act_open_dir:
+            folder = os.path.dirname(file_path)
+            if os.path.isdir(folder):
+                if sys.platform == "win32":
+                    os.startfile(folder)
+                else:
+                    import subprocess
+                    subprocess.Popen(["xdg-open", folder])
+        elif action == act_open_file:
+            target = self.output_map.get(file_path, file_path)
+            if os.path.exists(target):
+                if sys.platform == "win32":
+                    os.startfile(target)
+                else:
+                    import subprocess
+                    subprocess.Popen(["xdg-open", target])
+        elif action == act_preview:
+            self._preview_file_content(file_path)
+
+    def _preview_file_content(self, file_path: str):
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in (".txt", ".md", ".csv", ".json", ".xml"):
+            try:
+                for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "cp936"):
+                    try:
+                        with open(file_path, "r", encoding=enc) as f:
+                            content = f.read(5000)
+                        break
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                else:
+                    content = ""
+                if content:
+                    self.txt_preview_src.setPlainText(content)
+                    self.tab_widget.setCurrentIndex(2)
+                    self._update_preview()
+            except Exception as e:
+                QMessageBox.warning(self, t("dlg_error"), str(e))
+
+    def _on_table_double_clicked(self, row: int, col: int):
+        if 0 <= row < len(self.file_list):
+            file_path = self.file_list[row]
+            target = self.output_map.get(file_path, file_path)
+            if os.path.exists(target):
+                if sys.platform == "win32":
+                    os.startfile(target)
+                else:
+                    import subprocess
+                    subprocess.Popen(["xdg-open", target])
+
     def start_batch_processing(self):
+        if self.is_processing:
+            # 用户点击停止处理
+            self.lbl_status.setText(t("status_cancelling"))
+            self.btn_start.setEnabled(False)
+            if self.worker:
+                self.worker.cancel()
+            return
+
         if not self.file_list:
             QMessageBox.warning(self, t("dlg_tip"), t("dlg_no_files"))
             return
@@ -841,7 +973,10 @@ class MainWindow(QMainWindow):
         des = Desensitizer(cfg)
         suffix = self.input_suffix.text().strip() or DEFAULT_SUFFIX
 
-        self.btn_start.setEnabled(False)
+        self.is_processing = True
+        self.btn_start.setText(t("btn_stop"))
+        self.btn_start.setObjectName("DangerButton")
+        self.btn_start.setStyle(self.btn_start.style())
         self.btn_add_files.setEnabled(False)
         self.btn_add_folder.setEnabled(False)
         self.btn_clear_list.setEnabled(False)
@@ -865,6 +1000,9 @@ class MainWindow(QMainWindow):
 
     def _on_file_finished(self, index: int, output_path: str, stats: dict):
         self.last_output_dir = os.path.dirname(output_path)
+        if 0 <= index < len(self.file_list):
+            src_file = self.file_list[index]
+            self.output_map[src_file] = output_path
         item = self.table.item(index, 3)
         if item:
             item.setText(t("status_completed", stats.get('total_count', 0)))
@@ -877,18 +1015,26 @@ class MainWindow(QMainWindow):
             item.setForeground(QColor("#b91c1c"))
 
     def _on_all_finished(self, success: int, error: int):
+        was_cancelled = self.worker and getattr(self.worker, "_is_cancelled", False)
+        self.is_processing = False
+        self.btn_start.setText(t("btn_start"))
+        self.btn_start.setObjectName("PrimaryButton")
+        self.btn_start.setStyle(self.btn_start.style())
         self.btn_start.setEnabled(True)
         self.btn_add_files.setEnabled(True)
         self.btn_add_folder.setEnabled(True)
         self.btn_clear_list.setEnabled(True)
         self.btn_open_folder.setEnabled(bool(self.last_output_dir))
 
-        self.lbl_status.setText(t("status_finished", success, error))
-        QMessageBox.information(
-            self,
-            t("dlg_batch_complete_title"),
-            t("dlg_batch_complete_msg", success, error)
-        )
+        if was_cancelled:
+            self.lbl_status.setText(t("status_cancelled", success, error))
+        else:
+            self.lbl_status.setText(t("status_finished", success, error))
+            QMessageBox.information(
+                self,
+                t("dlg_batch_complete_title"),
+                t("dlg_batch_complete_msg", success, error)
+            )
 
     def open_output_dir(self):
         if self.last_output_dir and os.path.isdir(self.last_output_dir):
@@ -897,6 +1043,117 @@ class MainWindow(QMainWindow):
             else:
                 import subprocess
                 subprocess.Popen(["xdg-open", self.last_output_dir])
+
+    def _save_user_settings(self):
+        """将用户设置与词库自动持久化到本地系统注册表或配置文件
+        """
+        settings = QSettings("TheBitGlow", "InfoShield")
+        settings.setValue("app/lang", I18n.get_language())
+        settings.setValue("window/geometry", self.saveGeometry())
+
+        # Checkboxes
+        settings.setValue("rules/mask_names", self.chk_mask_names.isChecked())
+        settings.setValue("rules/auto_names", self.chk_auto_names.isChecked())
+        settings.setValue("rules/mask_units", self.chk_mask_units.isChecked())
+        settings.setValue("rules/mask_industries", self.chk_mask_industries.isChecked())
+        settings.setValue("rules/mask_id_card", self.chk_mask_id_card.isChecked())
+        settings.setValue("rules/mask_phone", self.chk_mask_phone.isChecked())
+        settings.setValue("rules/mask_email", self.chk_mask_email.isChecked())
+        settings.setValue("rules/mask_ip", self.chk_mask_ip.isChecked())
+        settings.setValue("rules/mask_bank_card", self.chk_mask_bank_card.isChecked())
+        settings.setValue("rules/mask_license_plate", self.chk_mask_license_plate.isChecked())
+        settings.setValue("rules/auto_orgs", self.chk_auto_orgs.isChecked())
+        settings.setValue("rules/auto_ind", self.chk_auto_ind.isChecked())
+        settings.setValue("rules/custom_words", self.chk_mask_custom_words.isChecked())
+
+        settings.setValue("rules/currency", self.chk_mask_currency.isChecked())
+        settings.setValue("rules/percentages", self.chk_mask_percentages.isChecked())
+        settings.setValue("rules/counts", self.chk_mask_counts.isChecked())
+        settings.setValue("rules/dates", self.chk_mask_dates.isChecked())
+        settings.setValue("rules/standalone", self.chk_mask_standalone.isChecked())
+
+        settings.setValue("rules/prot_chinese", self.chk_prot_chinese.isChecked())
+        settings.setValue("rules/prot_arabic", self.chk_prot_arabic.isChecked())
+        settings.setValue("rules/prot_special", self.chk_prot_special.isChecked())
+
+        # Parameters
+        settings.setValue("params/mask_char", self.input_mask_char.text())
+        settings.setValue("params/suffix", self.input_suffix.text())
+
+        # Dictionaries
+        settings.setValue("dict/units", self.txt_units.toPlainText())
+        settings.setValue("dict/names", self.txt_names.toPlainText())
+        settings.setValue("dict/industries", self.txt_industries.toPlainText())
+        settings.setValue("dict/whitelist", self.txt_whitelist.toPlainText())
+
+    def _load_user_settings(self):
+        """从本地恢复用户上次保存的设置与词库
+        """
+        settings = QSettings("TheBitGlow", "InfoShield")
+
+        geom = settings.value("window/geometry")
+        if geom:
+            self.restoreGeometry(geom)
+
+        saved_lang = settings.value("app/lang")
+        if saved_lang in (I18n.ZH, I18n.EN):
+            idx = 0 if saved_lang == I18n.ZH else 1
+            self.combo_lang.setCurrentIndex(idx)
+
+        def _get_bool(key, default):
+            v = settings.value(key, default)
+            if isinstance(v, str):
+                return v.lower() == "true"
+            return bool(v)
+
+        self.chk_mask_names.setChecked(_get_bool("rules/mask_names", True))
+        self.chk_auto_names.setChecked(_get_bool("rules/auto_names", True))
+        self.chk_mask_units.setChecked(_get_bool("rules/mask_units", True))
+        self.chk_mask_industries.setChecked(_get_bool("rules/mask_industries", True))
+        self.chk_mask_id_card.setChecked(_get_bool("rules/mask_id_card", True))
+        self.chk_mask_phone.setChecked(_get_bool("rules/mask_phone", True))
+        self.chk_mask_email.setChecked(_get_bool("rules/mask_email", True))
+        self.chk_mask_ip.setChecked(_get_bool("rules/mask_ip", True))
+        self.chk_mask_bank_card.setChecked(_get_bool("rules/mask_bank_card", True))
+        self.chk_mask_license_plate.setChecked(_get_bool("rules/mask_license_plate", True))
+        self.chk_auto_orgs.setChecked(_get_bool("rules/auto_orgs", True))
+        self.chk_auto_ind.setChecked(_get_bool("rules/auto_ind", True))
+        self.chk_mask_custom_words.setChecked(_get_bool("rules/custom_words", True))
+
+        self.chk_mask_currency.setChecked(_get_bool("rules/currency", True))
+        self.chk_mask_percentages.setChecked(_get_bool("rules/percentages", True))
+        self.chk_mask_counts.setChecked(_get_bool("rules/counts", True))
+        self.chk_mask_dates.setChecked(_get_bool("rules/dates", False))
+        self.chk_mask_standalone.setChecked(_get_bool("rules/standalone", True))
+
+        self.chk_prot_chinese.setChecked(_get_bool("rules/prot_chinese", True))
+        self.chk_prot_arabic.setChecked(_get_bool("rules/prot_arabic", True))
+        self.chk_prot_special.setChecked(_get_bool("rules/prot_special", True))
+
+        mask_char = settings.value("params/mask_char")
+        if mask_char:
+            self.input_mask_char.setText(str(mask_char))
+
+        suffix = settings.value("params/suffix")
+        if suffix:
+            self.input_suffix.setText(str(suffix))
+
+        units = settings.value("dict/units")
+        if units is not None and str(units).strip():
+            self.txt_units.setPlainText(str(units))
+        names = settings.value("dict/names")
+        if names is not None and str(names).strip():
+            self.txt_names.setPlainText(str(names))
+        industries = settings.value("dict/industries")
+        if industries is not None and str(industries).strip():
+            self.txt_industries.setPlainText(str(industries))
+        whitelist = settings.value("dict/whitelist")
+        if whitelist is not None and str(whitelist).strip():
+            self.txt_whitelist.setPlainText(str(whitelist))
+
+    def closeEvent(self, event):
+        self._save_user_settings()
+        event.accept()
 
 
 def run_app():

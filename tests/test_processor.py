@@ -88,6 +88,58 @@ class TestFileProcessor(unittest.TestCase):
         self.assertEqual(res_ws["A2"].value, "××")
         self.assertEqual(res_ws["B2"].value, "××")
 
+    def test_docx_run_style_preservation(self):
+        doc_path = os.path.join(self.tmp_dir, "styled.docx")
+        doc = docx.Document()
+        p = doc.add_paragraph()
+        r1 = p.add_run("联系人：")
+        r2 = p.add_run("李明")
+        r2.bold = True
+        r3 = p.add_run("，电话：")
+        r4 = p.add_run("13812345678")
+        r4.italic = True
+        doc.save(doc_path)
+
+        out_path, _ = self.processor.process_single_file(doc_path)
+        res_doc = docx.Document(out_path)
+        res_p = res_doc.paragraphs[0]
+        self.assertEqual(len(res_p.runs), 4)
+        self.assertEqual(res_p.runs[0].text, "联系人：")
+        self.assertEqual(res_p.runs[1].text, "××")
+        self.assertTrue(res_p.runs[1].bold)
+        self.assertEqual(res_p.runs[2].text, "，电话：")
+        self.assertEqual(res_p.runs[3].text, "×××")
+        self.assertTrue(res_p.runs[3].italic)
+
+    def test_xlsx_formula_and_sequence_protection(self):
+        xlsx_path = os.path.join(self.tmp_dir, "advanced.xlsx")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["序号", "手机号", "预算", "合计公式"])
+        ws.append([1, 13812345678, 5000, "=SUM(C2:C10)"])
+        ws.append([2, 13987654321, 6000, "=100+200"])
+        wb.save(xlsx_path)
+
+        out_path, _ = self.processor.process_single_file(xlsx_path)
+        res_wb = openpyxl.load_workbook(out_path)
+        res_ws = res_wb.active
+
+        # 序号列保护
+        self.assertEqual(res_ws["A2"].value, 1)
+        self.assertEqual(res_ws["A3"].value, 2)
+
+        # 手机长整数脱敏为实体 ×××
+        self.assertEqual(res_ws["B2"].value, "×××")
+        self.assertEqual(res_ws["B3"].value, "×××")
+
+        # 预算数字脱敏
+        self.assertEqual(res_ws["C2"].value, "××")
+        self.assertEqual(res_ws["C3"].value, "××")
+
+        # 公式保护：未被替换为字符或被脱敏
+        self.assertEqual(res_ws["D2"].value, "=SUM(C2:C10)")
+        self.assertEqual(res_ws["D3"].value, "=100+200")
+
 
 if __name__ == "__main__":
     unittest.main()

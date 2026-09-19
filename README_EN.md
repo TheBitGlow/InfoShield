@@ -99,12 +99,15 @@ InfoShield resolves these challenges with:
 
 | Category | Target Sensitive Data | Original Example | Masked Output | Rule Description |
 | :--- | :--- | :--- | :--- | :--- |
-| **Entities** | Personal Names | `John` / `Alice Smith` / `张三` | `×××` / `×××` / `××` | 1 char = `×`, 2 chars = `××`, ≥3 chars = `×××` (Max 3) |
-| **Entities** | Organizations / Companies | `Apple Inc.` / `Google LLC` / `研发中心` | `×××` / `×××` / `×××` | Auto-detects company suffixes; capped at 3 `×` |
+| **Entities** | Personal Names | `John` / `Alice Smith` / `张三` | `×××` / `×××` / `××` | 1 char = `×`, 2 chars = `××`, ≥3 chars = `×××` (Max 3); contextual title & surname sniffing |
+| **Entities** | Organizations / Companies | `Apple Inc.` / `Google LLC` / `研发中心` | `×××` / `×××` / `×××` | Non-greedy suffix detection preventing conversational sentence over-matching |
 | **Entities** | Industry Sectors | `FinTech` / `Finance` / `智能制造` | `×××` / `×××` / `×××` | Pre-built industry lexicon + custom words; capped at 3 `×` |
 | **Entities** | National ID Numbers | `420102199001011234` | `×××` | Matches 15/18-digit identity numbers; redacted to `×××` |
-| **Entities** | Phone Numbers | `+1-202-555-0199` / `13812345678` | `×××` | Landlines and mobile numbers replaced with `×××` |
+| **Entities** | Phone Numbers | `+1-202-555-0199` / `13812345678` | `×××` | Landlines and mobile numbers replaced with `×××` (auto-detects in Excel integer cells) |
 | **Entities** | Email Addresses | `user@enterprise.com` | `×××` | Full email strings replaced with `×××` |
+| **Entities** | IPv4 Addresses | `192.168.1.1` / `10.0.0.1` | `×××` | Detects network IP addresses while avoiding chapter/outline collision |
+| **Entities** | Bank Card Numbers | `6222021234567890123` | `×××` | Redacts 16~19 digit UnionPay and international bank card numbers |
+| **Entities** | Vehicle License Plates | `京A88888` / `粤B12345D` | `×××` | Supports conventional and new-energy vehicle license plates |
 | **Numbers** | Currency & Financials | `$128,000` / `¥1500万` / `500元` | `$××` / `¥××万` / `××元` | ≥2 digits mapped to `××`; retains currency symbols & units |
 | **Numbers** | Percentages & Ratios | `35.8%` / `5%` / `10.5 points` | `××%` / `×%` / `×× points` | 1 digit = `×`, ≥2 digits = `××`; keeps `%` and unit words |
 | **Numbers** | Quantities & Headcounts | `120 people` / `5 items` / `80 units` | `×× people` / `× items` / `×× units` | Preserves count qualifiers (people, items, units, etc.) |
@@ -112,20 +115,21 @@ InfoShield resolves these challenges with:
 | **Numbers** | Standalone Numbers | `7` / `1024` / `3.1415` | `×` / `××` / `××` | 1 digit = `×`, ≥2 digits = `××` |
 | **Protection**| Section & Chapter Outlines | `Chapter 1: Overview` / `第一章` | `Chapter 1: Overview` / `第一章` | **Strictly protected, never masked** |
 | **Protection**| Hierarchical Outlines | `一、项目背景` / `（一）阶段成果` | `一、项目背景` / `（一）阶段成果` | **Strictly protected, never masked** |
-| **Protection**| Arabic Outline Bulleting | `1. Roadmap` / `1.1 Architecture` | `1. Roadmap` / `1.1 Architecture` | **Protected; never confused with decimals** |
+| **Protection**| Arabic Outline Bulleting | `1. Roadmap` / `1.1 Architecture` | `1. Roadmap` / `1.1 Architecture` | **Protected; never confused with decimals or IPs** |
 | **Protection**| Circled & Letter Bullets | `① Action Item` / `A. Criteria` | `① Action Item` / `A. Criteria` | **Strictly protected, never masked** |
+| **Protection**| Excel Index Columns | `ID`, `No.`, `序号`, `编号` | `1`, `2`, `3` | **Strictly protected incremental table row indexes** |
 | **Whitelist** | Exempted Terms | `Adheres to InfoShield v1.0 standard` | `Adheres to InfoShield v1.0 standard` | **Highest priority exemption from masking** |
 
 ---
 
 ## 📁 Supported Document Formats
 
-| Extension | Format Description | Processing Depth |
+| Extension | Format Description | Processing Depth & Enhancements |
 | :--- | :--- | :--- |
-| **`.docx`** | Microsoft Word Document | Deep parsing through paragraphs, sections, and all embedded table cells |
-| **`.xlsx`** | Microsoft Excel Workbook | Iterates through cells across all sheets, maintaining cell geometry |
+| **`.docx`** | Microsoft Word Document | Run-level style fidelity (bold, color, fonts); deep parsing through paragraphs and tables |
+| **`.xlsx`** | Microsoft Excel Workbook | Formula preservation (`=SUM()`); long numerical phone/ID detection; sequence column protection |
 | **`.txt`** | Plain Text Document | Automatic character encoding detection (UTF-8, GBK, GB18030, UTF-8 BOM, etc.) |
-| **`.md`** | Markdown Document | Redacts content while preserving markdown heading formats and symbols |
+| **`.md`** | Markdown Document | Redacts content while preserving markdown heading formats and code blocks |
 | **`.csv`** | Comma-Separated Values | Line-by-line and field-by-field tokenized parsing into valid CSV |
 | **`.json`** | JSON Data Interchange | Traverses and masks values within hierarchical structures |
 | **`.xml`** | XML Markup Document | Redacts element node text values safely |

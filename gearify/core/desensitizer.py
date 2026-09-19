@@ -15,6 +15,11 @@ from ..config import (
     MAX_NUMBER_MASK_LEN,
     DEFAULT_INDUSTRIES,
     ORG_SUFFIXES,
+    STRONG_ORG_SUFFIXES,
+    WEAK_ORG_SUFFIXES,
+    COMMON_SURNAMES,
+    NAME_TITLE_PREFIXES,
+    NAME_EXCLUDE_WORDS,
 )
 
 
@@ -30,11 +35,15 @@ class DesensitizerConfig:
         protect_special_seq: bool = True,
         # 实体脱敏细项（最长3个×）
         mask_names: bool = True,
+        auto_detect_names: bool = True,
         mask_units: bool = True,
         mask_industries: bool = True,
         mask_id_card: bool = True,
         mask_phone: bool = True,
         mask_email: bool = True,
+        mask_ip: bool = True,
+        mask_bank_card: bool = True,
+        mask_license_plate: bool = True,
         mask_custom_keywords: bool = True,
         auto_detect_orgs: bool = True,
         auto_detect_industries: bool = True,
@@ -60,11 +69,15 @@ class DesensitizerConfig:
 
         # 实体类细项
         self.mask_names = mask_names
+        self.auto_detect_names = auto_detect_names
         self.mask_units = mask_units
         self.mask_industries = mask_industries
         self.mask_id_card = mask_id_card
         self.mask_phone = mask_phone
         self.mask_email = mask_email
+        self.mask_ip = mask_ip
+        self.mask_bank_card = mask_bank_card
+        self.mask_license_plate = mask_license_plate
         self.mask_custom_keywords = mask_custom_keywords
         self.auto_detect_orgs = auto_detect_orgs
         self.auto_detect_industries = auto_detect_industries
@@ -102,6 +115,9 @@ class DesensitizerConfig:
             self.mask_id_card or
             self.mask_phone or
             self.mask_email or
+            self.mask_ip or
+            self.mask_bank_card or
+            self.mask_license_plate or
             self.mask_custom_keywords
         )
 
@@ -138,40 +154,143 @@ class Desensitizer:
         # 3. 电子邮箱
         self.re_email = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
-        # 4. 单位机构后缀识别（2到25字中文接机构后缀）
-        suffix_group = "|".join(re.escape(s) for s in ORG_SUFFIXES)
-        self.re_org = re.compile(rf"[\u4e00-\u9fa5A-Za-z0-9]{{2,25}}(?:{suffix_group})")
+        # 4. 扩展实体：IPv4 地址
+        self.re_ip = re.compile(
+            r"(?<![0-9a-zA-Z_])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![0-9a-zA-Z_])"
+        )
 
-        # 5.1 金额与货币数据：带货币符号或带中文货币单位
-        # 符号金额：¥1,500.00, $500
+        # 5. 扩展实体：银行卡号（16~19位）
+        self.re_bank_card = re.compile(r"(?<!\d)(?:62\d{14,17}|[4-6]\d{15,18})(?!\d)")
+
+        # 6. 扩展实体：中国车辆号牌（燃油车7位与新能源8位）
+        self.re_license_plate = re.compile(
+            r"(?<![A-Za-z0-9])[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼][A-Z][A-HJ-NP-Z0-9]{4,5}[A-HJ-NP-Z0-9挂学警港澳练](?![A-Za-z0-9])"
+        )
+
+        # 7. 智能中文姓名上下文嗅探正则
+        self.re_name_pre = re.compile(
+            rf"(?:{NAME_TITLE_PREFIXES})[：:\s]*([{COMMON_SURNAMES}][\u4e00-\u9fa5]{{1,2}})"
+        )
+        self.re_name_post = re.compile(
+            rf"([{COMMON_SURNAMES}][\u4e00-\u9fa5]{{1,2}})(?:同志|先生|女士|老师|顾问|经理|主任|教授|工程师|专员|总监)"
+        )
+        self.post_title_prefixes = ["同志", "先生", "女士", "老师", "顾问", "经理", "主任", "教授", "工程师", "专员", "总监"]
+
+        # 8. 单位机构后缀识别（综合强弱后缀并防止贪婪误伤）
+        all_sufs = set(
+            STRONG_ORG_SUFFIXES + WEAK_ORG_SUFFIXES + [
+                "有限责任公司", "股份有限公司", "集团有限公司", "科技有限公司", "软件有限公司",
+                "有限公司", "企业集团", "研究院", "研究所", "大学", "学院", "医院", "银行", "分行", "支行", "协会"
+            ]
+        )
+        self.org_suffixes = sorted(list(all_sufs), key=len, reverse=True)
+        suf_pattern = "|".join(re.escape(s) for s in self.org_suffixes)
+        # 采用非贪婪模式匹配前置 2~12 字
+        self.re_raw_org = re.compile(rf"([\u4e00-\u9fa5A-Za-z0-9]{{2,12}}?(?:{suf_pattern}))")
+        self.stop_lead_words = [
+            "来自", "位于", "设立在", "设立于", "任职于", "就职于", "服务于", "投资", "收购",
+            "联合", "携手", "以及", "由", "与", "和", "同", "及", "在", "于", "向", "从",
+            "到了", "来到", "去了", "去", "到", "考察了", "考察", "参观了", "参观", "走访了", "走访",
+            "调研了", "调研", "访问了", "访问", "拜访了", "拜访", "签署了", "前往了", "前往", "交流",
+            "组织", "开展", "推动", "支持", "帮助", "协助", "他是", "她是", "他", "她", "它", "我们",
+            "他们", "你们", "今天", "昨天", "明天", "目前", "随后", "此前", "项目", "经", "毕业于", "就读于", "考入"
+        ]
+
+        # 9.1 金额与货币数据：带货币符号或带中文货币单位
+        # 符号金额：¥1,500.00, $500, €300, £250
         self.re_currency_sym = re.compile(
-            rf"(?:[¥$€￥]|RMB|USD|HKD)\s*(?:\d{{1,3}}(?:,\d{{3}})+|\d+)(?:\.\d+)?"
+            rf"(?:[¥$€￥£]|RMB|USD|HKD|EUR|GBP)\s*(?:\d{{1,3}}(?:,\d{{3}})+|\d+)(?:\.\d+)?"
         )
         # 中文货币金额：1500万元、500元、30.5万元
         self.re_currency_cn = re.compile(
-            r"(?<![0-9a-zA-Z_\x02\x03])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:万|亿|千|百|元|角|分|美金|美元|港币|欧)"
+            r"(?<![0-9a-zA-Z_\x02\x03])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:万|亿|千|百|元|角|分|美金|美元|港币|欧|镑)"
         )
 
-        # 5.2 占比与百分比：35.8%、100%、15.6个百分点、5‰
+        # 9.2 占比与百分比：35.8%、100%、15.6个百分点、5‰
         self.re_percentages = re.compile(
             r"(?<![0-9a-zA-Z_\x02\x03])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:%|‰|个百分点)"
         )
 
-        # 5.3 人数与统计数量量词：150人、5名、80户、3项、5个、10套、20台、30辆、50家、2.5倍等
+        # 9.3 人数与统计数量量词：150人、5名、80户、3项、5个、10套、20台、30辆、50家、2.5倍等
         count_units = r"(?:人|名|次|户|条|项|个|套|台|辆|家|宗|件|批|吨|千克|kg|m|km|㎡|m³|岁|点|倍)"
         self.re_counts = re.compile(
             rf"(?<![0-9a-zA-Z_\x02\x03])(?:\d{{1,3}}(?:,\d{{3}})+|\d+(?:\.\d+)?)\s*{count_units}"
         )
 
-        # 5.4 日期与年份：2024年、12月、15日
+        # 9.4 日期与年份：2024年、12月、15日
         self.re_dates = re.compile(
             r"(?<![0-9a-zA-Z_\x02\x03])(?:\d{2,4}\s*年|\d{1,2}\s*月|\d{1,2}\s*[日号])"
         )
 
-        # 5.5 独立纯数字或小数（如 100, 3.1415, 12, 5）
+        # 9.5 独立纯数字或小数（如 100, 3.1415, 12, 5）
         self.re_standalone_number = re.compile(
             r"(?<![0-9a-zA-Z_\x02\x03])\d+(?:,\d{3})*(?:\.\d+)?(?![0-9a-zA-Z_\x02\x03])"
         )
+
+    def extract_names(self, text: str) -> Set[str]:
+        """基于上下文公文称谓和百家姓自动识别正文人名
+        """
+        names = set()
+        for m in self.re_name_pre.finditer(text):
+            name = m.group(1)
+            for pt in self.post_title_prefixes:
+                if name.endswith(pt[0]):
+                    name = name[:-1]
+                    break
+            if name and name not in NAME_EXCLUDE_WORDS and len(name) >= 2:
+                names.add(name)
+
+        for m in self.re_name_post.finditer(text):
+            name = m.group(1)
+            if name and name not in NAME_EXCLUDE_WORDS and len(name) >= 2:
+                names.add(name)
+
+        return names
+
+    def extract_organizations(self, text: str) -> List[Tuple[str, int, int]]:
+        """基于非贪婪匹配与停用词过滤提取机构单位名，防止误伤整句
+        """
+        results = []
+        for m in self.re_raw_org.finditer(text):
+            full = m.group(1)
+            start = m.start(1)
+            end = m.end(1)
+
+            matched_s = None
+            for s in self.org_suffixes:
+                if full.endswith(s):
+                    matched_s = s
+                    break
+            if not matched_s:
+                continue
+
+            cleaned = full
+            while True:
+                matched_sw = False
+                for sw in sorted(self.stop_lead_words, key=len, reverse=True):
+                    if cleaned.startswith(sw):
+                        rem = cleaned[len(sw):]
+                        if rem.endswith(matched_s) and len(rem) - len(matched_s) >= 2:
+                            start += len(sw)
+                            cleaned = rem
+                            matched_sw = True
+                            break
+                if matched_sw:
+                    continue
+
+                # 检查首字是否为停用字符/介词/助词
+                if len(cleaned) - len(matched_s) > 2 and cleaned[0] in "在到去来回进出和与从向的是有对于关于中把被由及跟或了过着并且又即随":
+                    start += 1
+                    cleaned = cleaned[1:]
+                    continue
+
+                break
+
+            prefix = cleaned[:-len(matched_s)]
+            if 2 <= len(prefix) <= 12:
+                results.append((cleaned, start, start + len(cleaned)))
+
+        return results
 
     def mask_entity_text(self, text: str) -> str:
         """实体字符数映射：1字='×', 2字='××', 3字及以上='×××' (最多不超过3个×)
@@ -224,8 +343,12 @@ class Desensitizer:
         # 收集用户激活的各类实体词汇
         active_entities: Set[str] = set()
 
-        if self.config.mask_names and self.config.custom_names:
-            active_entities.update(self.config.custom_names)
+        if self.config.mask_names:
+            if self.config.custom_names:
+                active_entities.update(self.config.custom_names)
+            if self.config.auto_detect_names:
+                detected_names = self.extract_names(text)
+                active_entities.update(detected_names)
 
         if self.config.mask_units and self.config.custom_units:
             active_entities.update(self.config.custom_units)
@@ -280,17 +403,52 @@ class Desensitizer:
                     masked_val = self.mask_entity_text(m.group(0))
                     text = text[:m.start()] + masked_val + text[m.end():]
 
-        # 2.5 自动机构/单位识别
-        if self.config.mask_units and self.config.auto_detect_orgs:
-            matches = list(self.re_org.finditer(text))
+        # 2.5 扩展实体：IPv4 地址
+        if self.config.mask_ip:
+            matches = list(self.re_ip.finditer(text))
             if matches:
                 for m in reversed(matches):
-                    org_str = m.group(0)
+                    ip_str = m.group(0)
+                    if "\x02" in ip_str or "\x03" in ip_str:
+                        continue
+                    stats["entity_count"] += 1
+                    masked_val = self.mask_entity_text(ip_str)
+                    text = text[:m.start()] + masked_val + text[m.end():]
+
+        # 2.6 扩展实体：银行卡号
+        if self.config.mask_bank_card:
+            matches = list(self.re_bank_card.finditer(text))
+            if matches:
+                for m in reversed(matches):
+                    card_str = m.group(0)
+                    if "\x02" in card_str or "\x03" in card_str:
+                        continue
+                    stats["entity_count"] += 1
+                    masked_val = self.mask_entity_text(card_str)
+                    text = text[:m.start()] + masked_val + text[m.end():]
+
+        # 2.7 扩展实体：中国车辆号牌
+        if self.config.mask_license_plate:
+            matches = list(self.re_license_plate.finditer(text))
+            if matches:
+                for m in reversed(matches):
+                    plate_str = m.group(0)
+                    if "\x02" in plate_str or "\x03" in plate_str:
+                        continue
+                    stats["entity_count"] += 1
+                    masked_val = self.mask_entity_text(plate_str)
+                    text = text[:m.start()] + masked_val + text[m.end():]
+
+        # 2.8 智能机构/单位识别（防贪婪过滤）
+        if self.config.mask_units and self.config.auto_detect_orgs:
+            org_matches = self.extract_organizations(text)
+            if org_matches:
+                for org_str, start, end in reversed(org_matches):
                     if "\x02" in org_str or "\x03" in org_str:
                         continue
                     stats["entity_count"] += 1
                     masked_val = self.mask_entity_text(org_str)
-                    text = text[:m.start()] + masked_val + text[m.end():]
+                    text = text[:start] + masked_val + text[end:]
 
         # 第 3 步：数据类脱敏（细分项，最长不超过 2 个 ××）
         # 3.1 金额与货币数据
