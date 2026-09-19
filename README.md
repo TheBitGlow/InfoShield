@@ -238,7 +238,8 @@ InfoShield/
 │       ├── main_window.py  # 主界面组件与多线程批处理
 │       └── assets/         # 矢量图标与界面静态资源
 └── tests/                  # 自动化单元测试
-    └── test_desensitizer.py# 核心规则回归测试
+    ├── test_desensitizer.py# 核心脱敏规则测试
+    └── test_processor.py   # Word/Excel/文本处理测试
 ```
 
 ---

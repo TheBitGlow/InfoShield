@@ -29,3 +29,12 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Generated output files
+*_脱敏*
+*_masked*
+
+# Testing & Coverage
+.coverage
+htmlcov/
+.pytest_cache/

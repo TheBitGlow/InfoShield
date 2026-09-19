@@ -242,7 +242,8 @@ InfoShield/
 │       ├── main_window.py  # Main window components & QThread worker
 │       └── assets/         # Vector icons & UI graphic assets
 └── tests/                  # Automated unit test suite
-    └── test_desensitizer.py# Core rule validation tests
+    ├── test_desensitizer.py# Core desensitization rule tests
+    └── test_processor.py   # Word/Excel/Text document processing tests
 ```
 
 ---
